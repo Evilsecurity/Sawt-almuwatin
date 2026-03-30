@@ -675,6 +675,529 @@ footer {
    ← استبدل هذه القيم بمعلومات مشروعك
    ══════════════════════════════════════════════ */
 const firebaseConfig = {
+  apiKey: "AIzaSyCLySIApCe2y65OqbwDu0aXs6WAAofCGc4",
+  authDomain: "sawt-almuwatin.firebaseapp.com",
+  databaseURL: "https://sawt-almuwatin-default-rtdb.firebaseio.com",
+  projectId: "sawt-almuwatin",
+  storageBucket: "sawt-almuwatin.firebasestorage.app",
+  messagingSenderId: "967351624807",
+  appId: "1:967351624807:web:cddb126abcbdbb973320c2"
+};
+
+/* ══════════════════════════════════════════════
+   INIT
+   ══════════════════════════════════════════════ */
+let db = null;
+let useFirebase = false;
+let liveData = {
+  priorities: { health:0, education:0, employment:0, infrastructure:0, environment:0 },
+  ratings: { '1':0, '2':0, '3':0, '4':0, '5':0 },
+  totalVotes: 0
+};
+
+// محاولة الاتصال بـ Firebase
+try {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+  // اختبار الاتصال
+  db.ref('.info/connected').on('value', snap => {
+    if (snap.val() === true) {
+      useFirebase = true;
+      document.getElementById('setupNotice').style.display = 'none';
+      listenToFirebase();
+    }
+  });
+} catch(e) {
+  console.log('Firebase not configured — local mode');
+}
+
+// تحميل البيانات المحلية
+function loadLocalData() {
+  try {
+    const saved = localStorage.getItem('pollData_v2');
+    if (saved) liveData = JSON.parse(saved);
+  } catch(e) {}
+}
+
+function saveLocalData() {
+  localStorage.setItem('pollData_v2', JSON.stringify(liveData));
+}
+
+loadLocalData();
+updateUI();
+
+/* ══════════════════════════════════════════════
+   FIREBASE LISTENER
+   ══════════════════════════════════════════════ */
+function listenToFirebase() {
+  db.ref('pollData').on('value', snap => {
+    const val = snap.val();
+    if (val) {
+      liveData = val;
+      updateUI();
+    }
+  });
+}
+
+/* ══════════════════════════════════════════════
+   FINGERPRINT (أمان)
+   ══════════════════════════════════════════════ */
+async function getFingerprint() {
+  const parts = [
+    navigator.userAgent,
+    navigator.language,
+    screen.width + 'x' + screen.height,
+    new Date().getTimezoneOffset(),
+    navigator.hardwareConcurrency || '',
+    navigator.platform || ''
+  ].join('|');
+
+  // SHA-256 بسيط بدون مكتبة
+  const msgUint8 = new TextEncoder().encode(parts);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+}
+
+/* ══════════════════════════════════════════════
+   VOTE SECURITY CHECK
+   ══════════════════════════════════════════════ */
+async function hasAlreadyVoted(pollType) {
+  const fp = await getFingerprint();
+  const key = `voted_${pollType}_${fp}`;
+  // محلي
+  if (localStorage.getItem(key)) return true;
+  // Firebase
+  if (useFirebase) {
+    const snap = await db.ref(`votes/${pollType}/${fp}`).get();
+    if (snap.exists()) return true;
+  }
+  return false;
+}
+
+async function markVoted(pollType) {
+  const fp = await getFingerprint();
+  const key = `voted_${pollType}_${fp}`;
+  localStorage.setItem(key, '1');
+  if (useFirebase) {
+    await db.ref(`votes/${pollType}/${fp}`).set(Date.now());
+  }
+}
+
+/* ══════════════════════════════════════════════
+   SUBMIT
+   ══════════════════════════════════════════════ */
+async function submitVote(pollType) {
+  const checked = document.querySelector(`input[name="${pollType}"]:checked`);
+  if (!checked) { showAlert('يرجى اختيار إجابة أولاً'); return; }
+
+  const alreadyVoted = await hasAlreadyVoted(pollType);
+  if (alreadyVoted) { showAlert('لقد قمت بالتصويت مسبقاً في هذا الاستطلاع'); return; }
+
+  const val = checked.value;
+
+  if (pollType === 'priority') {
+    liveData.priorities[val] = (liveData.priorities[val] || 0) + 1;
+    liveData.totalVotes = (liveData.totalVotes || 0) + 1;
+  } else {
+    liveData.ratings[val] = (liveData.ratings[val] || 0) + 1;
+  }
+
+  // حفظ
+  saveLocalData();
+  if (useFirebase) {
+    await db.ref('pollData').set(liveData);
+  }
+  await markVoted(pollType);
+
+  // UI
+  document.getElementById(`ok-${pollType}`).style.display = 'block';
+  document.getElementById(`btn${pollType.charAt(0).toUpperCase()+pollType.slice(1)}`).disabled = true;
+  document.querySelectorAll(`#${pollType}Options .option`).forEach(o => o.style.pointerEvents = 'none');
+
+  updateUI();
+  showAlert('✅ تم تسجيل صوتك بنجاح!');
+}
+
+/* ══════════════════════════════════════════════
+   UI UPDATE
+   ══════════════════════════════════════════════ */
+const priorityLabels = {
+  health: '🏥 الخدمات الصحية',
+  education: '📚 التعليم',
+  employment: '💼 فرص العمل',
+  infrastructure: '🚇 البنية التحتية',
+  environment: '🌱 البيئة'
+};
+const ratingLabels = {
+  '5': '⭐⭐⭐⭐⭐ ممتاز',
+  '4': '⭐⭐⭐⭐ جيد',
+  '3': '⭐⭐⭐ متوسط',
+  '2': '⭐⭐ ضعيف',
+  '1': '⭐ سيء جداً'
+};
+
+function updateUI() {
+  const p = liveData.priorities || {};
+  const r = liveData.ratings || {};
+  const total = liveData.totalVotes || 0;
+
+  // stats
+  document.getElementById('s-total').textContent = total;
+
+  let topKey = '', topVal = 0;
+  for (const k in p) { if ((p[k]||0) > topVal) { topVal = p[k]; topKey = k; } }
+  document.getElementById('s-top').textContent = topKey ? priorityLabels[topKey].split(' ')[0] : '—';
+
+  let rSum = 0, rCount = 0;
+  for (const k in r) { rSum += k * (r[k]||0); rCount += (r[k]||0); }
+  const avg = rCount > 0 ? (rSum / rCount).toFixed(1) : '—';
+  document.getElementById('s-avg').textContent = avg + (avg !== '—' ? '/5' : '');
+
+  // priority results
+  let pHTML = '';
+  for (const k in p) {
+    const v = p[k] || 0;
+    const pct = total > 0 ? ((v / total) * 100).toFixed(1) : 0;
+    pHTML += `
+      <div class="result-item">
+        <div class="result-label">${priorityLabels[k]} <span>${v} صوت (${pct}%)</span></div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${pct}%"><span class="bar-pct">${pct}%</span></div>
+        </div>
+      </div>`;
+  }
+  document.getElementById('priorityResults').innerHTML = pHTML || '<p style="color:#999;text-align:center;">لا توجد أصوات بعد</p>';
+
+  // rating results
+  let rHTML = '';
+  for (const k of ['5','4','3','2','1']) {
+    const v = r[k] || 0;
+    const pct = rCount > 0 ? ((v / rCount) * 100).toFixed(1) : 0;
+    rHTML += `
+      <div class="result-item">
+        <div class="result-label">${ratingLabels[k]} <span>${v} صوت (${pct}%)</span></div>
+        <div class="bar-track">
+          <div class="bar-fill gold" style="width:${pct}%"><span class="bar-pct">${pct}%</span></div>
+        </div>
+      </div>`;
+  }
+  document.getElementById('ratingResults').innerHTML = rHTML || '<p style="color:#999;text-align:center;">لا توجد تقييمات بعد</p>';
+
+  // Donut chart
+  drawDonut(p, total);
+}
+
+/* ══════════════════════════════════════════════
+   DONUT CHART (Canvas)
+   ══════════════════════════════════════════════ */
+function drawDonut(p, total) {
+  const canvas = document.getElementById('donutCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H/2, R = 75, r = 45;
+  const colors = ['#1a5c5c','#c9a84c','#8b2020','#2a8080','#a07830'];
+  ctx.clearRect(0,0,W,H);
+
+  const keys = Object.keys(p);
+  const vals = keys.map(k => p[k] || 0);
+  const sum = vals.reduce((a,b)=>a+b,0);
+
+  if (sum === 0) {
+    ctx.fillStyle = '#e0ddd5';
+    ctx.beginPath();
+    ctx.arc(cx,cy,R,0,Math.PI*2);
+    ctx.arc(cx,cy,r,0,Math.PI*2,true);
+    ctx.fill();
+    ctx.fillStyle = '#999';
+    ctx.font = '12px Cairo';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('لا أصوات', cx, cy);
+    return;
+  }
+
+  let angle = -Math.PI/2;
+  vals.forEach((v,i) => {
+    const slice = (v/sum) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.arc(cx,cy,R,angle,angle+slice);
+    ctx.closePath();
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fill();
+    angle += slice;
+  });
+
+  // hole
+  ctx.beginPath();
+  ctx.arc(cx,cy,r,0,Math.PI*2);
+  ctx.fillStyle = 'white';
+  ctx.fill();
+
+  ctx.fillStyle = '#0d0d0d';
+  ctx.font = 'bold 20px Cairo';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(total, cx, cy-8);
+  ctx.font = '11px Cairo';
+  ctx.fillStyle = '#888';
+  ctx.fillText('صوت', cx, cy+12);
+}
+
+/* ══════════════════════════════════════════════
+   EXPORT CSV
+   ══════════════════════════════════════════════ */
+function exportCSV() {
+  const p = liveData.priorities || {};
+  const r = liveData.ratings || {};
+  let csv = 'النوع,الخيار,الأصوات\n';
+  for (const k in p) csv += `أولوية,${priorityLabels[k]},${p[k]||0}\n`;
+  for (const k of ['5','4','3','2','1']) csv += `تقييم,${ratingLabels[k]},${r[k]||0}\n`;
+
+  const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'poll-results.csv';
+  a.click(); URL.revokeObjectURL(url);
+}
+
+/* ══════════════════════════════════════════════
+   UI HELPERS
+   ══════════════════════════════════════════════ */
+function selectOption(el, group) {
+  document.querySelectorAll(`#${group}Options .option`).forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  el.querySelector('input').checked = true;
+}
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+  btn.classList.add('active');
+}
+
+function showAlert(msg) {
+  const el = document.getElementById('alertBox');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// تحديث النتائج كل 15 ثانية (Firebase يحدث تلقائياً، هذا للوضع المحلي)
+setInterval(() => { if (!useFirebase) updateUI(); }, 15000);
+</script>
+</body>
+</html>
+border-top: 1px solid var(--cream);
+  letter-spacing: 1px;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo">منصة مشاركة مجتمعية</div>
+    <h1>صوت <span>المواطن</span></h1>
+    <div class="header-line"></div>
+    <div class="header-sub">استطلاع أولويات التنمية — نتائج مباشرة</div>
+    <div class="live-badge"><div class="live-dot"></div>LIVE</div>
+  </div>
+</header>
+
+<nav>
+  <button class="nav-btn active" onclick="switchTab('vote', this)">📊 التصويت</button>
+  <button class="nav-btn" onclick="switchTab('results', this)">📈 النتائج</button>
+  <button class="nav-btn" onclick="switchTab('about', this)">ℹ️ عن المشروع</button>
+</nav>
+
+<main>
+
+  <!-- ─── SETUP NOTICE (يُخفى بعد إعداد Firebase) ─── -->
+  <div class="setup-notice" id="setupNotice">
+    <strong>⚙️ إعداد Firebase مطلوب</strong>
+    لتفعيل قاعدة البيانات المشتركة، استبدل القيم في <code>firebaseConfig</code> بمعلومات مشروعك على Firebase.
+    حتى ذلك الحين، يعمل التطبيق بوضع المحاكاة المحلية.
+  </div>
+
+  <!-- ─── TAB: VOTE ─── -->
+  <div id="tab-vote" class="tab-content active">
+
+    <div class="stats-bar">
+      <div class="stat-box">
+        <div class="stat-num" id="s-total">0</div>
+        <div class="stat-lbl">إجمالي الأصوات</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" id="s-top">—</div>
+        <div class="stat-lbl">الأولوية الأولى</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-num" id="s-avg">—</div>
+        <div class="stat-lbl">متوسط التقييم</div>
+      </div>
+    </div>
+
+    <!-- استطلاع الأولويات -->
+    <div class="poll-card">
+      <div class="poll-header">
+        <span class="badge">أولوية قصوى</span>
+        <h2>ما القضية التي تستحق الأولوية؟</h2>
+      </div>
+      <div class="poll-body">
+        <div id="priorityOptions">
+          <label class="option" onclick="selectOption(this, 'priority')">
+            <input type="radio" name="priority" value="health">
+            <div class="radio-custom"></div>
+            <span class="option-text">🏥 تحسين الخدمات الصحية وبناء مستشفيات</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'priority')">
+            <input type="radio" name="priority" value="education">
+            <div class="radio-custom"></div>
+            <span class="option-text">📚 الاستثمار في التعليم ورفع جودة التدريس</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'priority')">
+            <input type="radio" name="priority" value="employment">
+            <div class="radio-custom"></div>
+            <span class="option-text">💼 خلق فرص عمل ودعم المشاريع الصغرى</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'priority')">
+            <input type="radio" name="priority" value="infrastructure">
+            <div class="radio-custom"></div>
+            <span class="option-text">🚇 تطوير البنية التحتية والنقل العام</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'priority')">
+            <input type="radio" name="priority" value="environment">
+            <div class="radio-custom"></div>
+            <span class="option-text">🌱 حماية البيئة والطاقات المتجددة</span>
+          </label>
+        </div>
+        <button class="submit-btn" id="btnPriority" onclick="submitVote('priority')">تسجيل صوتي ←</button>
+        <div class="success-msg" id="ok-priority">✅ تم تسجيل صوتك بنجاح — شكراً لمشاركتك!</div>
+      </div>
+    </div>
+
+    <!-- استطلاع التقييم -->
+    <div class="poll-card">
+      <div class="poll-header" style="background:var(--gold); color:var(--ink);">
+        <span class="badge" style="background:var(--ink); color:var(--gold);">تقييم</span>
+        <h2>ما تقييمك للخدمات العمومية الحالية؟</h2>
+      </div>
+      <div class="poll-body">
+        <div id="ratingOptions">
+          <label class="option" onclick="selectOption(this, 'rating')">
+            <input type="radio" name="rating" value="5">
+            <div class="radio-custom"></div>
+            <span class="option-text">⭐⭐⭐⭐⭐ ممتاز — أفضل من المتوقع</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'rating')">
+            <input type="radio" name="rating" value="4">
+            <div class="radio-custom"></div>
+            <span class="option-text">⭐⭐⭐⭐ جيد — يلبي الاحتياجات الأساسية</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'rating')">
+            <input type="radio" name="rating" value="3">
+            <div class="radio-custom"></div>
+            <span class="option-text">⭐⭐⭐ متوسط — يحتاج تحسيناً</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'rating')">
+            <input type="radio" name="rating" value="2">
+            <div class="radio-custom"></div>
+            <span class="option-text">⭐⭐ ضعيف — دون المستوى المطلوب</span>
+          </label>
+          <label class="option" onclick="selectOption(this, 'rating')">
+            <input type="radio" name="rating" value="1">
+            <div class="radio-custom"></div>
+            <span class="option-text">⭐ سيء جداً — يحتاج إصلاحاً شاملاً</span>
+          </label>
+        </div>
+        <button class="submit-btn" id="btnRating" onclick="submitVote('rating')" style="background:var(--gold); color:var(--ink);">إرسال التقييم ←</button>
+        <div class="success-msg" id="ok-rating">✅ تم إرسال تقييمك — شكراً!</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ─── TAB: RESULTS ─── -->
+  <div id="tab-results" class="tab-content">
+
+    <div class="poll-card">
+      <div class="poll-header">
+        <span class="badge">نتائج مباشرة</span>
+        <h2>توزيع الأولويات</h2>
+      </div>
+      <div class="poll-body">
+        <canvas id="donutCanvas" width="200" height="200"></canvas>
+        <div id="priorityResults"><div class="loading"><div class="spinner"></div> جارٍ التحميل…</div></div>
+      </div>
+    </div>
+
+    <div class="poll-card">
+      <div class="poll-header" style="background:var(--gold); color:var(--ink);">
+        <span class="badge" style="background:var(--ink); color:var(--gold);">تقييمات</span>
+        <h2>توزيع تقييمات الخدمات</h2>
+      </div>
+      <div class="poll-body">
+        <div id="ratingResults"><div class="loading"><div class="spinner"></div> جارٍ التحميل…</div></div>
+        <button class="export-btn" onclick="exportCSV()">⬇ تصدير النتائج CSV</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ─── TAB: ABOUT ─── -->
+  <div id="tab-about" class="tab-content">
+    <div class="about-section">
+      <h3>📋 ما هو المشروع؟</h3>
+      <p><strong>صوت المواطن</strong> منصة مفتوحة لاستطلاع آراء المواطنين حول القضايا المجتمعية. نؤمن بأن كل صوت يساهم في تشكيل أولويات التنمية.</p>
+    </div>
+    <div class="about-section">
+      <h3>🛡️ الأمان والخصوصية</h3>
+      <ul>
+        <li>التصويت مجهول المصدر — لا نجمع أي بيانات شخصية</li>
+        <li>يُستخدم <strong>Browser Fingerprint</strong> لمنع التصويت المزدوج بدلاً من localStorage وحده</li>
+        <li>تحقق مزدوج: محلي (localStorage) + رقمي (fingerprint hash)</li>
+        <li>البيانات المعروضة إحصائية فقط</li>
+      </ul>
+    </div>
+    <div class="about-section">
+      <h3>⚙️ التقنيات المستخدمة</h3>
+      <ul>
+        <li>Firebase Realtime Database — قاعدة بيانات مشتركة بين جميع المستخدمين</li>
+        <li>Browser Fingerprinting — تحسين أمان التصويت</li>
+        <li>Canvas API — رسوم بيانية دائرية بدون مكتبات خارجية</li>
+        <li>تصدير CSV — لتحليل البيانات خارجياً</li>
+      </ul>
+    </div>
+    <div class="about-section">
+      <h3>🎯 الأهداف</h3>
+      <ul>
+        <li>قياس اهتمامات المواطنين بالقضايا المختلفة</li>
+        <li>توفير منصة شفافة للتعبير عن الرأي</li>
+        <li>المساعدة في فهم الأولويات المجتمعية</li>
+        <li>تشجيع المشاركة المدنية الفعالة</li>
+      </ul>
+    </div>
+  </div>
+
+</main>
+
+<footer>
+  صوت المواطن — مشروع مفتوح المصدر &nbsp;|&nbsp; 2025
+</footer>
+
+<!-- Alert toast -->
+<div class="alert" id="alertBox"></div>
+
+<script>
+/* ══════════════════════════════════════════════
+   FIREBASE CONFIG
+   ← استبدل هذه القيم بمعلومات مشروعك
+   ══════════════════════════════════════════════ */
+const firebaseConfig = {
   apiKey: "YOUR_API_KEY",
   authDomain: "YOUR_PROJECT.firebaseapp.com",
   databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
